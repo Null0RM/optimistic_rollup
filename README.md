@@ -1,6 +1,7 @@
 # optimistic_rollup
 
 개발 순서
+
 step1 - L2 state transition function
     {address: balance} dictionary 형태 계좌 state 만들고
     execute_tx(state, tx) -> new_state 구현
