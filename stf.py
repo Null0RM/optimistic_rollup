@@ -1,3 +1,10 @@
+'''
+state, tx -> state
+이 계산만 해주면 됨.
+-> networking, 저장, ordering, consensus 전부 할 필요 없음
+'''
+
+
 from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
@@ -56,19 +63,20 @@ State = dict  # dict[str, Account]
 # ---------- 핵심: STF ----------
 
 # tx는 mint, transfer만 있다고 가정하는 중
-def apply_tx(state: State, tx: Transaction) -> State:
-    """
-    state를 직접 수정하지 않고, 반영된 '새 state'를 반환한다.
-    실패 시 예외를 던지고 원본 state는 절대 건드리지 않는다.
-    """
+# state를 직접 수정하지 않고, 반영된 '새 state'를 반환한다.
+# 실패 시 예외를 던지고 원본 state는 건드리지 않음
+# mint: L1에서 mint동작이 이루어지면, event handler가 mint event를 읽고 처리함
+# transfer: L2에서 sequencer에게 전달되는 tx
+
+def apply_tx(state: State, tx: Transaction) -> State:   
     # mint던, transfer이던 값이 양수여야 함
     if tx.amount < 0:
         raise InvalidAmount(f"amount must be positive: {tx.amount}")
 
-    new_state = dict(state)  # shallow copy: 이번 tx가 건드리는 계좌만 새로 교체
+    new_state = dict(state)    # state를 shallow copy
 
     if tx.tx_type == "mint":
-        recipient = new_state.get(tx.recipient, Account())
+        recipient = new_state.get(tx.recipient, Account()) # 있으면 있던거, 없으면 새로 Account()만들어서 사용
         new_state[tx.recipient] = Account(
             balance=recipient.balance + tx.amount,
             nonce=recipient.nonce,
