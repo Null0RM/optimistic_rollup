@@ -30,77 +30,83 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional, Union
 
 from Crypto.Hash import keccak
+import rlp
 
 # ---------- 해시 함수 ----------
-
-HashFn = Callable[[bytes], bytes]
-
 
 def keccak256(data: bytes) -> bytes:
     k = keccak.new(digest_bits=256)
     k.update(data)
-    return k.hexdigest()
+    return k.digest()
 
-def empty_trie_root(hash_fn: HashFn = keccak256) -> bytes:
-    """
-    빈 트라이의 root 해시. SMT의 default_hashes[depth]에 대응하는 개념이지만,
-    MPT는 depth가 없으므로 상수 하나로 충분하다.
-    TODO: keccak256(rlp_encode(b"")) 로 구현.
-    """
-    raise NotImplementedError
-
+def empty_trie_root() -> bytes:
+    return keccak256(rlp_encode(b""))
 
 # ---------- 니블(nibble) 유틸 ----------
 
 Nibbles = list[int]  # 각 원소는 0~15 (반 바이트 단위)
 
-
 def bytes_to_nibbles(data: bytes) -> Nibbles:
-    """bytes를 4비트씩(니블) 쪼갠다. 순서는 상위 니블이 먼저."""
-    raise NotImplementedError
+    nibbles = Nibbles()
+
+    for byte in data:
+        nibbles.append(byte >> 4)
+        nibbles.append(byte & 0x0F)
+    
+    return nibbles
 
 
 def nibbles_to_bytes(nibbles: Nibbles) -> bytes:
-    """니블 리스트를 다시 bytes로 합친다. len(nibbles)가 홀수면 에러 처리할 것."""
-    raise NotImplementedError
+    if len(nibbles) % 2 == 1:
+        raise ValueError("Number of nibbles must be even") 
+
+    result = bytearray()
+
+    for i in range(0, len(nibbles), 2):
+        result.append(nibbles[i] << 4 | nibbles[i + 1])
+
+    return bytes(result)
 
 
 def common_prefix_len(a: Nibbles, b: Nibbles) -> int:
-    """두 니블 시퀀스가 앞에서부터 몇 개나 일치하는지 반환. extension node
-    생성/분기 판단에 필요."""
-    raise NotImplementedError
+    min_idx = min(len(a), len(b))
+    
+    for idx in range(min_idx):
+        if a[idx] != b[idx]:
+            return idx
+    return min_idx
 
-
-# ---------- Hex-Prefix(HP) 인코딩 ----------
+# ---------- Hex-Prefix 인코딩 ----------
 # leaf/extension 노드의 path를 하나의 bytes로 압축 인코딩한다. 첫 니블에
 # (terminator 여부: leaf인가, 남은 니블 개수가 홀수인가)를 함께 담는다.
-# TODO: 표준 HP 인코딩 표(짝수/홀수 x leaf/extension = 4가지 케이스) 참고해 구현.
 
 def hp_encode(nibbles: Nibbles, is_leaf: bool) -> bytes:
-    """path 니블들과 leaf 여부를 하나의 bytes로 압축 인코딩한다."""
-    raise NotImplementedError
+    flag = 2 if is_leaf else 0          # 0=extension, 2=leaf
+    if len(nibbles) % 2 == 0:
+        prefixed = [flag, 0] + nibbles  
+    else:
+        prefixed = [flag + 1] + nibbles  
+    return nibbles_to_bytes(prefixed)
 
 
 def hp_decode(data: bytes) -> tuple[Nibbles, bool]:
-    """hp_encode의 역변환. (니블 리스트, is_leaf)를 반환."""
-    raise NotImplementedError
+    nibbles = bytes_to_nibbles(data)
+    flag = nibbles[0]
+    is_leaf = flag in (2, 3)
+    is_odd = flag in (1, 3)
+    path = nibbles[1:] if is_odd else nibbles[2:]
+    return path, is_leaf
 
 
 # ---------- RLP 인코딩 ----------
-# 노드를 최종 bytes로 직렬화하는 데 필요한 범용 인코딩 (트라이 로직과는
-# 무관한 별도 스펙). 학습 목표가 트라이 구조 자체라면, 직접 구현하는 대신
-# `rlp` 패키지(pip install rlp)를 써서 시간을 아끼는 것도 방법이다.
 
 RLPItem = Union[bytes, list["RLPItem"]]
 
-
 def rlp_encode(item: RLPItem) -> bytes:
-    raise NotImplementedError
-
+    return rlp.encode(item)
 
 def rlp_decode(data: bytes) -> RLPItem:
-    raise NotImplementedError
-
+    return rlp.decode(data)
 
 # ---------- 노드 표현 ----------
 
@@ -125,24 +131,47 @@ class BranchNode:
 
 Node = Union[LeafNode, ExtensionNode, BranchNode]
 
-
 def encode_node(node: Node) -> bytes:
     """
-    노드를 이더리움 표준 형태(leaf/extension은 [encoded_path, value] 2-항목,
-    branch는 [child0..child15, value] 17-항목)로 변환한 뒤 RLP 인코딩한다.
+    leaf/extension은 [encoded_path, value] 2-항목,
+    branch는 [child0 ~ child15, value] 17-항목)로 변환해서 rlp_encode
     """
-    raise NotImplementedError
+    if isinstance(node, LeafNode):
+        items = [hp_encode(node.path, is_leaf=True), node.value] # value는 이미 rlp encoding되어있음
+    elif isinstance(node, ExtensionNode):
+        items = [hp_encode(node.path, is_leaf=False), node.child_ref]
+    elif isinstance(node, BranchNode):
+        children_enc = [c if c is not None else b"" for c in node.children]
+        value_enc = node.value if node.value is not None else b""
+        items = children_enc + [value_enc]
+    else:
+        raise TypeError(f"unknown node type: {type(node)}")
+
+    return rlp_encode(items)
 
 
 def decode_node(data: bytes) -> Node:
-    """encode_node의 역변환. RLP 디코딩 후 항목 개수(2 vs 17)와 HP 인코딩의
-    terminator 비트를 보고 Leaf/Extension/Branch 중 무엇인지 판별한다."""
-    raise NotImplementedError
+    """
+    RLP decode 후 item 수(2 / 17)와 hp encoding의
+    terminator bit를 보고 Leaf/Extension/Branch 판별 및 decode
+    """
+    items = rlp_decode(data)
+    if len(items) == 17: # branch node
+        children = [c if c != b"" else None for c in items[:16]]
+        value = items[16] if items[16] != b"" else None
+        return BranchNode(children=children, value=value)
+    elif len(items) == 2: # extension/leaf
+        encoded_path, second = items
+        path, is_leaf = hp_decode(encoded_path)
+        if is_leaf: # leaf node
+            return LeafNode(path=path, value=second)
+        else: 
+            return ExtensionNode(path=path, child_ref=second)
+    else: 
+        raise ValueError(f"Invalid RLP node: expected 2 or 17 items")
 
-
-def hash_node(node: Node, hash_fn: HashFn = keccak256) -> bytes:
-    """encode_node(node)를 해시한다 — 부모 노드가 이 노드를 참조하는 값."""
-    raise NotImplementedError
+def hash_node(node: Node) -> bytes:
+    return keccak256(encode_node(node))
 
 
 # ---------- 트라이 상태 ----------
@@ -157,19 +186,17 @@ class PatriciaTrie:
     db: dict[bytes, bytes] = field(default_factory=dict)
 
 
-def new_empty_trie(hash_fn: HashFn = keccak256) -> PatriciaTrie:
+def new_empty_trie() -> PatriciaTrie:
     """빈 PatriciaTrie를 생성한다 (root_hash = empty_trie_root)."""
-    raise NotImplementedError
+    return PatriciaTrie(empty_trie_root())
 
 
-def build_trie(
-    items: dict[bytes, bytes],
-    hash_fn: HashFn = keccak256,
-) -> PatriciaTrie:
+def build_trie(items: dict[bytes, bytes]) -> PatriciaTrie:
     """
     key-value 매핑 전체로부터 트라이를 구성하는 편의 함수.
     내부적으로는 new_empty_trie()에서 시작해 update()를 반복 호출하는 것과
     같다 (MPT는 SMT의 build_tree처럼 한 번에 뭉쳐 계산하는 지름길이 없다).
+    이거 어케하는거지 .. 
     """
     raise NotImplementedError
 
@@ -178,23 +205,135 @@ def build_trie(
 
 def get(trie: PatriciaTrie, key: bytes) -> Optional[bytes]:
     """
-    key에 해당하는 값을 조회한다. root부터 니블 경로를 따라 내려가며
-    Branch/Extension/Leaf를 순회한다. 없으면 None.
+    key 대응 값 조회한다. root부터 nibble path 따라 내려가면서
+    Branch/Extension/Leaf 순회 -> 없으면 None
     """
-    raise NotImplementedError
+    if trie.root_hash == empty_trie_root():
+        return None
 
+    path = bytes_to_nibbles(key)
+    node_hash = trie.root_hash
+
+    while True:
+        node_data = trie.db.get(node_hash)
+        if node_data is None:
+            raise KeyError(f"node not in db: {node_hash.hex()}")
+        node = decode_node(node_data)
+
+        if isinstance(node, LeafNode):
+            if node.path == path:
+                return node.value
+            return None  # 남은 path가 leaf의 path와 안 맞음 -> key 없음
+
+        elif isinstance(node, ExtensionNode):
+            plen = len(node.path)
+            if path[:plen] == node.path:
+                path = path[plen:]        # 공유된 니블만큼 소비
+                node_hash = node.child_ref
+                continue
+            return None  # extension 단계에서 이미 경로가 갈라짐 -> key 없음
+
+        elif isinstance(node, BranchNode):
+            if len(path) == 0:
+                return node.value          # key가 정확히 이 branch에서 끝남
+            nibble = path[0]
+            child_ref = node.children[nibble]
+            if child_ref is None:
+                return None                # 그 니블 방향엔 자식이 없음 -> key 없음
+            path = path[1:]                # 니블 1개 소비
+            node_hash = child_ref
+            continue
+
+        else:
+            raise TypeError(f"unknown node type in trie: {type(node)}")
+
+def _store(db, node): 
+    h = hash_node(node)
+    db[h] = encode_node(node)
+
+    return h
+
+def _insert(db, node_hash, path, value) -> bytes:
+    if node_hash is empty_trie_root():
+        return _store(db, LeafNode(path=path, value=value))
+
+    node = decode_node(db[node_hash])
+
+    if isinstance(node, LeafNode):
+        if node.path == path:
+            return _store(db, LeafNode(path=path, value=value))  # 덮어쓰기
+
+        plen = common_prefix_len(node.path, path)
+        old_rem = node.path[plen:]
+        new_rem = path[plen:]
+        branch = BranchNode()
+
+        branch.children[old_rem[0]] = _store(db, LeafNode(encoded_path=old_rem[1:], value=node.value)) # rem 길이 관련해서 생각해보기
+        branch.children[new_rem[0]] = _store(db, LeafNode(encoded_path=new_rem[1:], value=value))
+
+        branch_hash = _store(db, branch)
+        
+        if plen == 0:
+            return branch_hash
+        return _store(db, ExtensionNode(encoded_path=path[:plen], child_ref=branch_hash))
+
+    elif isinstance(node, ExtensionNode):
+        plen = common_prefix_len(node.path, path)
+
+        if plen == len(node.path):
+            # 새 key가 extension의 path를 완전히 포함 -> 그대로 통과해서 더 내려감
+            new_child_hash = _insert(db, node.child_ref, path[plen:], value)
+            return _store(db, ExtensionNode(path=node.path, child_ref=new_child_hash))
+
+        # extension 중간에서 갈라짐 -> extension을 쪼갬
+        old_rem = node.path[plen:]
+        new_rem = path[plen:]
+        branch = BranchNode()
+
+        if len(old_rem) == 1:
+            branch.children[old_rem[0]] = node.child_ref  # 니블 1개 남았으면 바로 연결
+        else:
+            branch.children[old_rem[0]] = _store(db, ExtensionNode(path=old_rem[1:], child_ref=node.child_ref))
+
+        if len(new_rem) == 0:
+            branch.value = value
+        else:
+            branch.children[new_rem[0]] = _store(db, LeafNode(path=new_rem[1:], value=value))
+
+        branch_hash = _store(db, branch)
+        if plen == 0:
+            return branch_hash
+        return _store(db, ExtensionNode(path=node.path[:plen], child_ref=branch_hash))
+
+    elif isinstance(node, BranchNode):
+        if len(path) == 0:
+            return _store(db, BranchNode(children=list(node.children), value=value))
+        nibble = path[0]
+        new_child_hash = _insert(db, node.children[nibble], path[1:], value)
+        new_children = list(node.children)
+        new_children[nibble] = new_child_hash
+        return _store(db, BranchNode(children=new_children, value=node.value))
+
+    else:
+        raise TypeError(f"unknown node type: {type(node)}")
+
+    
 
 def update(trie: PatriciaTrie, key: bytes, value: bytes) -> PatriciaTrie:
     """
-    key-value를 삽입/갱신한 '새' PatriciaTrie를 반환한다 (원본은 불변).
+    key-value를 삽입/갱신한 '새' PatriciaTrie를 반환한다(원본 건들지 않기)
 
     TODO: 최소한 아래 케이스를 다 다뤄야 한다.
-      - 빈 트라이에 첫 leaf 삽입
       - 기존 leaf의 경로와 새 key의 경로가 처음부터 갈라짐 -> branch 생성
       - 기존 leaf와 새 key가 니블 일부를 공유 -> extension + branch 조합
       - 이미 있는 key를 그대로 덮어쓰는 경우
     """
-    raise NotImplementedError
+
+    new_db = dict(trie.db)
+    path = bytes_to_nibbles(key)
+    new_root = _insert(new_db, trie.root_hash, path, value)
+
+    return PatriciaTrie(root_hash=new_root, db=new_db)
 
 
 def delete(trie: PatriciaTrie, key: bytes) -> PatriciaTrie:
@@ -238,8 +377,7 @@ def verify_proof(
     root_hash: bytes,
     key: bytes,
     value: Optional[bytes],
-    proof: MPTProof,
-    hash_fn: HashFn = keccak256,
+    proof: MPTProof
 ) -> bool:
     """
     trie 전체 없이 root_hash, key, value, proof만으로 검증한다.

@@ -76,7 +76,7 @@ def apply_tx(state: State, tx: Transaction) -> State:
     new_state = dict(state)    # state를 shallow copy
 
     if tx.tx_type == "mint":
-        recipient = new_state.get(tx.recipient, Account()) # 있으면 있던거, 없으면 새로 Account()만들어서 사용
+        recipient = new_state.get(tx.recipient, Account()) d# 있으면 있던거, 없으면 새로 Account()만들어서 사용
         new_state[tx.recipient] = Account(
             balance=recipient.balance + tx.amount,
             nonce=recipient.nonce,
