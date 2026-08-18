@@ -137,7 +137,10 @@ def encode_node(node: Node) -> bytes:
     branch는 [child0 ~ child15, value] 17-항목)로 변환해서 rlp_encode
     """
     if isinstance(node, LeafNode):
-        items = [hp_encode(node.path, is_leaf=True), node.value] # value는 이미 rlp encoding되어있음
+        value = node.value
+        if len(value) > 32:
+            value = keccak256(value)
+        items = [hp_encode(node.path, is_leaf=True), value] # value는 이미 rlp encoding되어있음
     elif isinstance(node, ExtensionNode):
         items = [hp_encode(node.path, is_leaf=False), node.child_ref]
     elif isinstance(node, BranchNode):
@@ -148,7 +151,6 @@ def encode_node(node: Node) -> bytes:
         raise TypeError(f"unknown node type: {type(node)}")
 
     return rlp_encode(items)
-
 
 def decode_node(data: bytes) -> Node:
     """
@@ -196,9 +198,13 @@ def build_trie(items: dict[bytes, bytes]) -> PatriciaTrie:
     key-value 매핑 전체로부터 트라이를 구성하는 편의 함수.
     내부적으로는 new_empty_trie()에서 시작해 update()를 반복 호출하는 것과
     같다 (MPT는 SMT의 build_tree처럼 한 번에 뭉쳐 계산하는 지름길이 없다).
-    이거 어케하는거지 .. 
     """
-    raise NotImplementedError
+    trie = new_empty_trie()
+    
+    for key, value in items.items():
+        trie = update(trie, key, value)
+    
+    return trie
 
 
 # ---------- 핵심 인터페이스 ----------
@@ -254,7 +260,7 @@ def _store(db, node):
     return h
 
 def _insert(db, node_hash, path, value) -> bytes:
-    if node_hash is empty_trie_root():
+    if node_hash is None:
         return _store(db, LeafNode(path=path, value=value))
 
     node = decode_node(db[node_hash])
@@ -268,23 +274,31 @@ def _insert(db, node_hash, path, value) -> bytes:
         new_rem = path[plen:]
         branch = BranchNode()
 
-        branch.children[old_rem[0]] = _store(db, LeafNode(encoded_path=old_rem[1:], value=node.value)) # rem 길이 관련해서 생각해보기
-        branch.children[new_rem[0]] = _store(db, LeafNode(encoded_path=new_rem[1:], value=value))
+        # state trie에서는 모든 LeafNode가 같은 길이의 key 값을 가지기 때문에 조건문이 필요없는데, receipt trie, storage trie에서는 다름
+        if len(old_rem) == 0:  
+            branch.value = node.value
+        else:
+            branch.children[old_rem[0]] = _store(db, LeafNode(path=old_rem[1:], value=node.value))
+        
+        if len(new_rem) == 0:
+            branch.value = value
+        else:
+            branch.children[new_rem[0]] = _store(db, LeafNode(path=new_rem[1:], value=value))
 
         branch_hash = _store(db, branch)
         
         if plen == 0:
             return branch_hash
-        return _store(db, ExtensionNode(encoded_path=path[:plen], child_ref=branch_hash))
+        return _store(db, ExtensionNode(path=path[:plen], child_ref=branch_hash))
 
     elif isinstance(node, ExtensionNode):
         plen = common_prefix_len(node.path, path)
 
         if plen == len(node.path):
-            # 새 key가 extension의 path를 완전히 포함 -> 그대로 통과해서 더 내려감
+            # 새 path가 extension을 포함 -> 재귀
             new_child_hash = _insert(db, node.child_ref, path[plen:], value)
             return _store(db, ExtensionNode(path=node.path, child_ref=new_child_hash))
-
+        
         # extension 중간에서 갈라짐 -> extension을 쪼갬
         old_rem = node.path[plen:]
         new_rem = path[plen:]
@@ -322,16 +336,11 @@ def _insert(db, node_hash, path, value) -> bytes:
 def update(trie: PatriciaTrie, key: bytes, value: bytes) -> PatriciaTrie:
     """
     key-value를 삽입/갱신한 '새' PatriciaTrie를 반환한다(원본 건들지 않기)
-
-    TODO: 최소한 아래 케이스를 다 다뤄야 한다.
-      - 기존 leaf의 경로와 새 key의 경로가 처음부터 갈라짐 -> branch 생성
-      - 기존 leaf와 새 key가 니블 일부를 공유 -> extension + branch 조합
-      - 이미 있는 key를 그대로 덮어쓰는 경우
     """
-
     new_db = dict(trie.db)
     path = bytes_to_nibbles(key)
-    new_root = _insert(new_db, trie.root_hash, path, value)
+    root_hash = None if trie.root_hash == empty_trie_root() else trie.root_hash
+    new_root = _insert(new_db, root_hash, path, value)
 
     return PatriciaTrie(root_hash=new_root, db=new_db)
 
@@ -350,8 +359,7 @@ def delete(trie: PatriciaTrie, key: bytes) -> PatriciaTrie:
 
 
 def state_root(trie: PatriciaTrie) -> bytes:
-    """현재 트라이의 root 해시. (SMT 버전과 함수명을 맞춰 stf.py 쪽 변경을 최소화)"""
-    raise NotImplementedError
+    trie.root_hash
 
 
 # ---------- 증명(proof) ----------
